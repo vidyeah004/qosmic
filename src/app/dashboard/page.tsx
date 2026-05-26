@@ -7,6 +7,7 @@ const modules = [
   { id: 'investor-update', name: 'Investor Update', desc: 'Raw notes → formatted investor email', icon: '📈', href: '/dashboard/investor-update', tag: 'A1' },
   { id: 'competitive-intel', name: 'Competitive Intel', desc: 'Track Mynaric, Skyloom, BridgeComm', icon: '🔭', href: '/dashboard/competitive-intel', tag: 'A1/A2' },
   { id: 'a2-suite', name: 'Agentic Suite', desc: 'Meta-orchestrator: CI + Outreach + Papers', icon: '🤖', href: '/dashboard/a2', tag: 'A2' },
+  { id: 'eval', name: 'RAG Eval Suite', desc: 'Run 25 questions, scored by LLM judge', icon: '📊', href: '/dashboard/eval', tag: 'A1' },
 ]
 
 export default async function DashboardPage() {
