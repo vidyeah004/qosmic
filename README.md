@@ -105,4 +105,4 @@ Dashboard home shows aggregate stats.
 
 ---
 
-Built by Sreevidya for QOSMIC Founder's Office Internship — November 2024
+Built by Sreevidya for QOSMIC Founder's Office Internship - June 2026
