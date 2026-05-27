@@ -9,12 +9,19 @@ export default async function DashboardLayout({
 }) {
   const supabase = createServerSupabase()
   const { data: { session } } = await supabase.auth.getSession()
-  
   if (!session) redirect('/login')
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', session.user.id)
+    .single()
+
+  const role = profile?.role ?? 'intern'
 
   return (
     <div className="flex h-screen bg-zinc-950 overflow-hidden">
-      <Sidebar userEmail={session.user.email ?? ''} />
+      <Sidebar userEmail={session.user.email ?? ''} role={role} />
       <main className="flex-1 overflow-y-auto">
         {children}
       </main>
