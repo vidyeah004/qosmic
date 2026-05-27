@@ -1,4 +1,6 @@
 import { createServerSupabase } from '@/lib/supabase-server'
+import Link from 'next/link'
+import AdminPanel from '@/components/ui/AdminPanel'
 
 const modules = [
   { id: 'rag', name: 'Document RAG', desc: 'Upload docs, query with cited answers', icon: '📄', href: '/dashboard/rag', tag: 'A1' },
@@ -12,6 +14,17 @@ const modules = [
 
 export default async function DashboardPage() {
   const supabase = createServerSupabase()
+
+  const { data: { session } } = await supabase.auth.getSession()
+
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', session?.user.id)
+    .single()
+
+  const role = profile?.role ?? 'intern'
+
   const { data: sessions } = await supabase
     .from('sessions')
     .select('module, latency_ms, cost_usd, created_at')
@@ -24,34 +37,40 @@ export default async function DashboardPage() {
     ? Math.round(sessions.reduce((a, s) => a + (s.latency_ms ?? 0), 0) / sessions.length)
     : 0
 
+  // Only fetch users list for founders
+  const allUsers = role === 'founder'
+    ? (await supabase.from('profiles').select('id, email, role, created_at').order('created_at')).data ?? []
+    : []
+
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-8">
-      {/* Header */}
       <div>
         <h1 className="text-2xl font-semibold text-white">QOSMIC FOOS</h1>
-        <p className="text-zinc-400 mt-1">Founder&apos;s Office Operating System</p>
+        <p className="text-zinc-400 mt-1">Founder's Office Operating System</p>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-4">
-        {[
-          { label: 'Total Runs', value: totalSessions },
-          { label: 'Avg Latency', value: `${avgLatency}ms` },
-          { label: 'Est. Cost', value: `$${totalCost.toFixed(4)}` },
-        ].map(stat => (
-          <div key={stat.label} className="card text-center">
-            <div className="text-2xl font-bold text-white">{stat.value}</div>
-            <div className="text-zinc-400 text-sm mt-1">{stat.label}</div>
-          </div>
-        ))}
-      </div>
+      {/* Stats — founder only */}
+      {role === 'founder' && (
+        <div className="grid grid-cols-3 gap-4">
+          {[
+            { label: 'Total Runs', value: totalSessions },
+            { label: 'Avg Latency', value: `${avgLatency}ms` },
+            { label: 'Est. Cost', value: `$${totalCost.toFixed(4)}` },
+          ].map(stat => (
+            <div key={stat.label} className="card text-center">
+              <div className="text-2xl font-bold text-white">{stat.value}</div>
+              <div className="text-zinc-400 text-sm mt-1">{stat.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* Modules Grid */}
+      {/* Modules */}
       <div>
         <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">Modules</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {modules.map(mod => (
-            <a
+            <Link
               key={mod.id}
               href={mod.href}
               className="card hover:border-zinc-600 hover:bg-zinc-800/50 transition-all group cursor-pointer"
@@ -62,10 +81,18 @@ export default async function DashboardPage() {
               </div>
               <h3 className="font-medium text-white group-hover:text-brand-500 transition-colors">{mod.name}</h3>
               <p className="text-zinc-400 text-sm mt-1">{mod.desc}</p>
-            </a>
+            </Link>
           ))}
         </div>
       </div>
+
+      {/* Admin Panel — founder only */}
+      {role === 'founder' && (
+        <div>
+          <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">Team Access</h2>
+          <AdminPanel users={allUsers} />
+        </div>
+      )}
     </div>
   )
 }
