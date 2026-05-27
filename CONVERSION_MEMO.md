@@ -95,7 +95,7 @@ Managing the whole operational infrastructure of a company building something ge
 
 I walk away happy.
 
-I am 21, I have an aerospace obsession and a habit of building things nobody asked me to build. Twelve weeks at a company working on lasers in space, sitting next to people who surpassed DRDO's 10km optical link record, is not a consolation prize by any definition.
+I am 21, I have a caffeine addiction, a lot of dark circles, and a habit of building things because that seemed cool to me. Twelve weeks at a company working on lasers in space, sitting next to people who surpassed DRDO's 10km optical link record, is not a consolation prize by any definition.
 
 I will walk out knowing more about optical systems, technical operations, and what it actually takes to build a deep tech company from the inside than any classroom or online course could have given me.
 
