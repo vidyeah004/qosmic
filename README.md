@@ -5,19 +5,18 @@
 **Live app:** [qosmic-two.vercel.app](https://qosmic-two.vercel.app)
 
 ---
-
 ## 📂 Where to Find Everything
 
 | Document | What it is |
 |---|---|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Full system architecture, stack, DB schema, role access |
+| [FOOS_Architecture.md](./FOOS_Architecture.md) | Full system architecture, stack, DB schema, role access |
 | [CONVERSION_MEMO.md](./CONVERSION_MEMO.md) | Part B: intern to full-time conversion case |
 | [A3_TECHNICAL_BRIEF.md](./A3_TECHNICAL_BRIEF.md) | Cloud segmentation research prototype and cost projection |
 | [failure_modes.md](./failure_modes.md) | Failure mode register for all 5 modules |
 | [a2_orchestrator_eval.md](./a2_orchestrator_eval.md) | A2 meta-orchestrator routing accuracy results |
 | [Adversarial_results.md](./Adversarial_results.md) | Q2 adversarial email test suite results |
 | [schema.sql](./schema.sql) | Full Supabase database schema |
-| [`qosmic/`](./qosmic) | Q1 Obsidian knowledge graph vault (20+ interconnected notes) |
+| [qosmic/](./qosmic) | Q1 Obsidian knowledge graph vault (20+ interconnected notes) |
 
 ---
 
