@@ -1,81 +1,60 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { callLLM } from '@/lib/groq'
-import { logSession } from '@/lib/logger'
 import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
 import { cookies } from 'next/headers'
 
-// In-memory doc store (session-level; swap for Supabase + embeddings in prod)
-const docStore: { title: string; content: string }[] = []
-
-export async function POST(req: NextRequest) {
-  const body = await req.json()
+export async function GET() {
   const supabase = createRouteHandlerClient({ cookies })
-  const { data: { session } } = await supabase.auth.getSession()
+  const { data: { user } } = await supabase.auth.getUser()
 
-  if (body.action === 'add') {
-    const { title, content } = body
-    docStore.push({ title, content })
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user?.id)
+    .single()
 
-    // Also save to Supabase for persistence
-    await supabase.from('documents').insert([{
-      user_id: session?.user.id,
-      title,
-      content,
-      module: 'rag'
-    }])
+  const role = profile?.role ?? 'intern'
 
-    return NextResponse.json({ success: true, count: docStore.length })
+  let q = supabase
+    .from('documents')
+    .select('id, title, content, visibility, user_id')
+    .eq('module', 'rag')
+    .order('created_at', { ascending: false })
+
+  if (role !== 'founder') {
+    q = q.or(`visibility.eq.shared,and(visibility.eq.private,user_id.eq.${user?.id})`)
   }
 
-  if (body.action === 'query') {
-    const { query } = body
+  const { data: docs } = await q
 
-    // Retrieve all docs (simple keyword matching; replace with vector search later)
-    const context = docStore
-      .map(d => `[${d.title}]\n${d.content}`)
-      .join('\n\n---\n\n')
-      .slice(0, 6000)
+  return NextResponse.json({
+    docs: (docs ?? []).map(d => ({
+      id: d.id,
+      title: d.title,
+      preview: d.content.slice(0, 80) + '…',
+      visibility: d.visibility,
+      own: d.user_id === user?.id
+    }))
+  })
+}
 
-    if (!context) {
-      // Try fetching from Supabase
-      const { data: docs } = await supabase
-        .from('documents')
-        .select('title, content')
-        .eq('module', 'rag')
-        .limit(10)
+export async function DELETE(req: NextRequest) {
+  const { id } = await req.json()
+  const supabase = createRouteHandlerClient({ cookies })
+  const { data: { user } } = await supabase.auth.getUser()
 
-      const dbContext = (docs ?? [])
-        .map((d: { title: string; content: string }) => `[${d.title}]\n${d.content}`)
-        .join('\n\n---\n\n')
-        .slice(0, 6000)
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user?.id)
+    .single()
 
-      if (!dbContext) {
-        return NextResponse.json({ answer: 'No documents in knowledge base yet. Add some documents first.' })
-      }
-    }
+  const role = profile?.role ?? 'intern'
 
-    const system = `You are a technical assistant for QOSMIC, a satellite communication startup. 
-Answer questions using ONLY the provided context documents.
-Always cite which document(s) you used like this: [Source: Document Title].
-If the answer is not in the context, say so explicitly.`
+  // founders can delete any doc; interns only their own
+  let q = supabase.from('documents').delete().eq('id', id)
+  if (role !== 'founder') q = q.eq('user_id', user?.id)
 
-    const userPrompt = `Context:\n${context}\n\nQuestion: ${query}`
+  await q
 
-    const start = Date.now()
-    const result = await callLLM(system, userPrompt)
-
-    await logSession({
-      user_id: session?.user.id,
-      module: 'rag',
-      input: query,
-      output: result.text,
-      latency_ms: result.latency_ms,
-      cost_usd: result.estimated_cost_usd,
-      model: result.model
-    })
-
-    return NextResponse.json({ answer: result.text, latency_ms: Date.now() - start })
-  }
-
-  return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
+  return NextResponse.json({ success: true })
 }
