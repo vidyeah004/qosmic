@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { callLLM } from '@/lib/groq'
+import { logSession } from '@/lib/logger'
 import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
 import { cookies } from 'next/headers'
 
-export async function GET() {
+export async function POST(req: NextRequest) {
+  const body = await req.json()
   const supabase = createRouteHandlerClient({ cookies })
   const { data: { user } } = await supabase.auth.getUser()
 
@@ -14,47 +17,68 @@ export async function GET() {
 
   const role = profile?.role ?? 'intern'
 
-  let q = supabase
-    .from('documents')
-    .select('id, title, content, visibility, user_id')
-    .eq('module', 'rag')
-    .order('created_at', { ascending: false })
+  if (body.action === 'add') {
+    const { title, content, visibility = 'shared' } = body
 
-  if (role !== 'founder') {
-    q = q.or(`visibility.eq.shared,and(visibility.eq.private,user_id.eq.${user?.id})`)
+    // interns can only add private docs
+    const finalVisibility = role === 'founder' ? visibility : 'private'
+
+    const { data } = await supabase.from('documents').insert([{
+      user_id: user?.id,
+      title,
+      content,
+      module: 'rag',
+      visibility: finalVisibility
+    }]).select('id').single()
+
+    return NextResponse.json({ success: true, id: data?.id })
   }
 
-  const { data: docs } = await q
+  if (body.action === 'query') {
+    const { query } = body
 
-  return NextResponse.json({
-    docs: (docs ?? []).map(d => ({
-      id: d.id,
-      title: d.title,
-      preview: d.content.slice(0, 80) + '…',
-      visibility: d.visibility,
-      own: d.user_id === user?.id
-    }))
-  })
-}
+    // founders see all docs; interns see shared + their own private
+    let q = supabase
+      .from('documents')
+      .select('title, content')
+      .eq('module', 'rag')
 
-export async function DELETE(req: NextRequest) {
-  const { id } = await req.json()
-  const supabase = createRouteHandlerClient({ cookies })
-  const { data: { user } } = await supabase.auth.getUser()
+    if (role !== 'founder') {
+      q = q.or(`visibility.eq.shared,and(visibility.eq.private,user_id.eq.${user?.id})`)
+    }
 
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('role')
-    .eq('id', user?.id)
-    .single()
+    const { data: docs } = await q.limit(20)
 
-  const role = profile?.role ?? 'intern'
+    const context = (docs ?? [])
+      .map((d: { title: string; content: string }) => `[${d.title}]\n${d.content}`)
+      .join('\n\n---\n\n')
+      .slice(0, 6000)
 
-  // founders can delete any doc; interns only their own
-  let q = supabase.from('documents').delete().eq('id', id)
-  if (role !== 'founder') q = q.eq('user_id', user?.id)
+    if (!context) {
+      return NextResponse.json({ answer: 'No documents in knowledge base yet. Add some documents first.' })
+    }
 
-  await q
+    const system = `You are a technical assistant for QOSMIC Space, a satellite laser communication startup based at IISc Bengaluru.
+Answer questions using ONLY the provided context documents.
+Always cite which document(s) you used like this: [Source: Document Title].
+If the answer is not in the context, say "Insufficient evidence in knowledge base." Do not hallucinate.`
 
-  return NextResponse.json({ success: true })
+    const userPrompt = `Context:\n${context}\n\nQuestion: ${query}`
+    const start = Date.now()
+    const result = await callLLM(system, userPrompt)
+
+    await logSession({
+      user_id: user?.id,
+      module: 'rag',
+      input: query,
+      output: result.text,
+      latency_ms: result.latency_ms,
+      cost_usd: result.estimated_cost_usd,
+      model: result.model
+    })
+
+    return NextResponse.json({ answer: result.text, latency_ms: Date.now() - start })
+  }
+
+  return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
 }
