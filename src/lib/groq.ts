@@ -3,12 +3,15 @@ import Groq from 'groq-sdk'
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 export const DEFAULT_MODEL = 'llama-3.3-70b-versatile'
+export const FALLBACK_MODEL = 'llama-3.1-8b-instant'
 
 export interface LLMResponse {
   text: string
   model: string
   latency_ms: number
   estimated_cost_usd: number
+  fallback?: boolean
+  error?: string
 }
 
 export async function callLLM(
@@ -17,25 +20,63 @@ export async function callLLM(
   model = DEFAULT_MODEL
 ): Promise<LLMResponse> {
   const start = Date.now()
-  const res = await groq.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    temperature: 0.3,
-    max_tokens: 2000
-  })
-  const latency_ms = Date.now() - start
-  const text = res.choices[0]?.message?.content ?? ''
-  // Groq free tier — cost is effectively $0, but track token usage anyway
-  const tokens = (res.usage?.total_tokens ?? 0)
-  const estimated_cost_usd = tokens * 0.0000008 // ~$0.80/1M tokens estimate
 
-  return { text, model, latency_ms, estimated_cost_usd }
+  try {
+    const res = await groq.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.3,
+      max_tokens: 2000
+    })
+
+    const latency_ms = Date.now() - start
+    const text = res.choices[0]?.message?.content ?? ''
+    const tokens = res.usage?.total_tokens ?? 0
+    const estimated_cost_usd = tokens * 0.0000008
+
+    return { text, model, latency_ms, estimated_cost_usd }
+
+  } catch (err: unknown) {
+    // Primary model failed, try fallback
+    if (model !== FALLBACK_MODEL) {
+      try {
+        const res = await groq.chat.completions.create({
+          model: FALLBACK_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.3,
+          max_tokens: 2000
+        })
+
+        const latency_ms = Date.now() - start
+        const text = res.choices[0]?.message?.content ?? ''
+        const tokens = res.usage?.total_tokens ?? 0
+        const estimated_cost_usd = tokens * 0.0000008
+
+        return { text, model: FALLBACK_MODEL, latency_ms, estimated_cost_usd, fallback: true }
+
+      } catch {
+        // Fallback also failed
+      }
+    }
+
+    const latency_ms = Date.now() - start
+    const message = err instanceof Error ? err.message : 'Unknown error'
+    return {
+      text: 'Service temporarily unavailable. Please try again in a moment.',
+      model,
+      latency_ms,
+      estimated_cost_usd: 0,
+      error: message
+    }
+  }
 }
 
-// Multi-LLM: call multiple providers in parallel, return all responses
 export async function callMultiLLM(
   systemPrompt: string,
   userPrompt: string
@@ -53,9 +94,9 @@ export async function callMultiLLM(
   return results
     .filter((r): r is PromiseFulfilledResult<LLMResponse> => r.status === 'fulfilled')
     .map(r => r.value)
+    .filter(r => !r.error)
 }
 
-// LLM-as-judge: pick best response from multi-LLM outputs
 export async function judgeResponses(
   question: string,
   responses: LLMResponse[]
@@ -65,9 +106,7 @@ export async function judgeResponses(
 
   const prompt = `You are a judge. Given a question and multiple AI responses, pick the BEST one.
 Return ONLY a JSON object: { "winner_index": <number>, "reason": "<brief reason>" }
-
 Question: ${question}
-
 ${responses.map((r, i) => `Response ${i} (${r.model}):\n${r.text}`).join('\n\n---\n\n')}`
 
   const judgment = await callLLM(
