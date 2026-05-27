@@ -12,41 +12,40 @@ observability.
 **Auth:** Supabase Auth with role-based access (Founder / Intern)
 
 ---
-
 ## System Architecture
+
+```
 User Browser
-│
-▼
+     │
+     ▼
 Vercel Edge (Next.js 14 App Router)
-│
-├── /dashboard          → Server components, reads Supabase directly
-├── /dashboard/rag      → Client component + API route
-├── /dashboard/email-triage
-├── /dashboard/meeting-notes
-├── /dashboard/investor-update
-├── /dashboard/competitive-intel
-├── /dashboard/a2       → Meta-orchestrator
-└── /dashboard/eval     → RAG evaluation suite
-│
-▼
+     │
+     ├── /dashboard          → Server components, reads Supabase directly
+     ├── /dashboard/rag      → Client component + API route
+     ├── /dashboard/email-triage
+     ├── /dashboard/meeting-notes
+     ├── /dashboard/investor-update
+     ├── /dashboard/competitive-intel
+     ├── /dashboard/a2       → Meta-orchestrator
+     └── /dashboard/eval     → RAG evaluation suite
+     │
+     ▼
 API Routes (/app/api/*)
-│
-├── callLLM()           → Groq primary (llama-3.3-70b-versatile)
-│                          Fallback (llama-3.1-8b-instant)
-├── logSession()        → Supabase sessions table
-└── Supabase client     → documents, vendor_emails, profiles
-│
-▼
+     │
+     ├── callLLM()           → Groq primary (llama-3.3-70b-versatile)
+     │                          Fallback (llama-3.1-8b-instant)
+     ├── logSession()        → Supabase sessions table
+     └── Supabase client     → documents, vendor_emails, profiles
+     │
+     ▼
 Supabase (PostgreSQL + Auth)
-│
-├── profiles            → users + roles
-├── documents           → RAG knowledge base
-├── sessions            → observability logs
-├── vendor_emails       → triage history
-└── document_permissions→ selective sharing
-
----
-
+     │
+     ├── profiles            → users + roles
+     ├── documents           → RAG knowledge base
+     ├── sessions            → observability logs
+     ├── vendor_emails       → triage history
+     └── document_permissions→ selective sharing
+```
 ## Database Schema
 
 | Table | Purpose |
