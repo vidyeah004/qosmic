@@ -15,12 +15,12 @@ const modules = [
 export default async function DashboardPage() {
   const supabase = createServerSupabase()
 
-  const { data: { session } } = await supabase.auth.getSession()
+  const { data: { user } } = await supabase.auth.getUser()
 
   const { data: profile } = await supabase
     .from('profiles')
     .select('role')
-    .eq('id', session?.user.id)
+    .eq('id', user?.id)
     .single()
 
   const role = profile?.role ?? 'intern'
@@ -37,7 +37,6 @@ export default async function DashboardPage() {
     ? Math.round(sessions.reduce((a, s) => a + (s.latency_ms ?? 0), 0) / sessions.length)
     : 0
 
-  // Only fetch users list for founders
   const allUsers = role === 'founder'
     ? (await supabase.from('profiles').select('id, email, role, created_at').order('created_at')).data ?? []
     : []
@@ -46,10 +45,9 @@ export default async function DashboardPage() {
     <div className="p-8 max-w-6xl mx-auto space-y-8">
       <div>
         <h1 className="text-2xl font-semibold text-white">QOSMIC FOOS</h1>
-        <p className="text-zinc-400 mt-1">Founder's Office Operating System</p>
+        <p className="text-zinc-400 mt-1">Founder&apos;s Office Operating System</p>
       </div>
 
-      {/* Stats — founder only */}
       {role === 'founder' && (
         <div className="grid grid-cols-3 gap-4">
           {[
@@ -65,7 +63,6 @@ export default async function DashboardPage() {
         </div>
       )}
 
-      {/* Modules */}
       <div>
         <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">Modules</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -86,7 +83,6 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      {/* Admin Panel — founder only */}
       {role === 'founder' && (
         <div>
           <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">Team Access</h2>
