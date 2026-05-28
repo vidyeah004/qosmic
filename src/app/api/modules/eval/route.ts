@@ -35,7 +35,6 @@ const EVAL_QUESTIONS = [
   { id: 'Q25', category: 'insufficient', question: "What is the bill of materials cost for a single terminal unit?", ground_truth: "INSUFFICIENT EVIDENCE — no BOM cost data exists. Only partial cost deltas in design decision trades.", required_notes: [] },
 ]
 
-// Wraps a promise with a timeout — returns fallback instead of hanging forever
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([
     promise,
@@ -113,7 +112,6 @@ Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"
   }
 }
 
-// Process one question end-to-end with a hard 28s timeout per question
 async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
   const ragFallback = { answer: 'Timed out — no answer returned.', docs_retrieved: 0, latency_ms: 28000 }
   const judgeFallback = { score: 0, reasoning: 'Timed out before judge could score.' }
@@ -147,52 +145,66 @@ async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
 
 export async function POST(req: NextRequest) {
   try {
-  const supabase = createRouteHandlerClient({ cookies })
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const supabase = createRouteHandlerClient({ cookies })
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const body = await req.json()
+    const body = await req.json()
 
-  if (body.action === 'run_eval') {
-    // Tally scores
-    let totalScore = 0
-    let factualScore = 0, factualCount = 0
-    let multiScore = 0, multiCount = 0
-    let insufficientScore = 0, insufficientCount = 0
+    if (body.action === 'run_eval') {
+      // Run in parallel batches of 5
+      const BATCH_SIZE = 5
+      const results: Awaited<ReturnType<typeof processQuestion>>[] = []
 
-    for (const r of results) {
-      totalScore += r.score
-      if (r.category === 'factual') { factualScore += r.score; factualCount++ }
-      if (r.category === 'multi_note') { multiScore += r.score; multiCount++ }
-      if (r.category === 'insufficient') { insufficientScore += r.score; insufficientCount++ }
+      for (let i = 0; i < EVAL_QUESTIONS.length; i += BATCH_SIZE) {
+        const batch = EVAL_QUESTIONS.slice(i, i + BATCH_SIZE)
+        const batchResults = await Promise.all(
+          batch.map((q) => processQuestion(q, supabase))
+        )
+        results.push(...batchResults)
+      }
+
+      let totalScore = 0
+      let factualScore = 0, factualCount = 0
+      let multiScore = 0, multiCount = 0
+      let insufficientScore = 0, insufficientCount = 0
+
+      for (const r of results) {
+        totalScore += r.score
+        if (r.category === 'factual') { factualScore += r.score; factualCount++ }
+        if (r.category === 'multi_note') { multiScore += r.score; multiCount++ }
+        if (r.category === 'insufficient') { insufficientScore += r.score; insufficientCount++ }
+      }
+
+      const summary = {
+        total_questions: EVAL_QUESTIONS.length,
+        overall_score: Number((totalScore / EVAL_QUESTIONS.length).toFixed(2)),
+        factual_score: Number((factualScore / factualCount).toFixed(2)),
+        multi_note_score: Number((multiScore / multiCount).toFixed(2)),
+        insufficient_evidence_score: Number((insufficientScore / insufficientCount).toFixed(2)),
+        recall_at_3: Number((results.reduce((s, r) => s + r.recall_at_3, 0) / results.length).toFixed(2)),
+        recall_at_5: Number((results.reduce((s, r) => s + r.recall_at_5, 0) / results.length).toFixed(2)),
+        avg_latency_ms: Number((results.reduce((s, r) => s + r.latency_ms, 0) / results.length).toFixed(0)),
+      }
+
+      await supabase.from('documents').insert([{
+        user_id: user.id,
+        title: `Eval Run ${new Date().toISOString()}`,
+        content: JSON.stringify({ summary, results }),
+        module: 'eval_log',
+        visibility: 'private'
+      }])
+
+      return NextResponse.json({ summary, results })
     }
 
-    const summary = {
-      total_questions: EVAL_QUESTIONS.length,
-      overall_score: Number((totalScore / EVAL_QUESTIONS.length).toFixed(2)),
-      factual_score: Number((factualScore / factualCount).toFixed(2)),
-      multi_note_score: Number((multiScore / multiCount).toFixed(2)),
-      insufficient_evidence_score: Number((insufficientScore / insufficientCount).toFixed(2)),
-      recall_at_3: Number((results.reduce((s, r) => s + r.recall_at_3, 0) / results.length).toFixed(2)),
-      recall_at_5: Number((results.reduce((s, r) => s + r.recall_at_5, 0) / results.length).toFixed(2)),
-      avg_latency_ms: Number((results.reduce((s, r) => s + r.latency_ms, 0) / results.length).toFixed(0)),
+    if (body.action === 'get_questions') {
+      return NextResponse.json({ questions: EVAL_QUESTIONS })
     }
 
-    // Log the run
-    await supabase.from('documents').insert([{
-      user_id: user.id,
-      title: `Eval Run ${new Date().toISOString()}`,
-      content: JSON.stringify({ summary, results }),
-      module: 'eval_log',
-      visibility: 'private'
-    }])
+    return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
 
-    return NextResponse.json({ summary, results })
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message ?? String(err) }, { status: 500 })
   }
-
-  if (body.action === 'get_questions') {
-    return NextResponse.json({ questions: EVAL_QUESTIONS })
-  }
-
-  return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
 }
