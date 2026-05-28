@@ -131,9 +131,9 @@ Full eval methodology in [a2_orchestrator_eval.md](./a2_orchestrator_eval.md).
 
 ## 🎥 Screen Recordings
 
-- A1 platform walkthrough: *[link]*
-- A2 agentic suite walkthrough: *[link]*
-- A3 research prototype walkthrough: *[link]*
+- A1 platform walkthrough: *[will update]*
+- A2 agentic suite walkthrough: *[will update]*
+- A3 research prototype walkthrough: *[will update]*
 
 ---
 
