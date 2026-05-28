@@ -80,10 +80,11 @@ If the answer is not in the context, explicitly say: "INSUFFICIENT EVIDENCE — 
   return { answer, docs_retrieved: docs.length, latency_ms: Date.now() - start }
 }
 
-async function judgeAnswer(question: string, ground_truth: string, answer: string, category: string): Promise<{ score: number; reasoning: string }> {
+// Judge 1: Llama via Groq
+async function judgeGroq(question: string, ground_truth: string, answer: string, category: string): Promise<{ score: number; reasoning: string }> {
   const rubric = category === 'insufficient'
-    ? 'Score 1.0 if the model correctly says the evidence is insufficient and does NOT hallucinate an answer. Score 0.5 if it hedges but still guesses. Score 0.0 if it hallucinates a confident answer.'
-    : 'Score 1.0 if the key facts match ground truth and sources are cited. Score 0.5 if partially correct or missing key detail. Score 0.0 if wrong or hallucinated.'
+    ? 'Score 1.0 if the model correctly says the evidence is insufficient and does NOT hallucinate. Score 0.5 if it hedges but still guesses. Score 0.0 if it hallucinates a confident answer.'
+    : 'Score 1.0 if key facts match ground truth and sources are cited. Score 0.5 if partially correct or missing key detail. Score 0.0 if wrong or hallucinated.'
 
   const response = await groq.chat.completions.create({
     model: 'llama-3.1-8b-instant',
@@ -93,10 +94,7 @@ async function judgeAnswer(question: string, ground_truth: string, answer: strin
         content: `You are an evaluation judge. Score the answer against the ground truth using this rubric: ${rubric}
 Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"}`
       },
-      {
-        role: 'user',
-        content: `Question: ${question}\nGround truth: ${ground_truth}\nAnswer to evaluate: ${answer}`
-      }
+      { role: 'user', content: `Question: ${question}\nGround truth: ${ground_truth}\nAnswer to evaluate: ${answer}` }
     ],
     max_tokens: 150,
     temperature: 0
@@ -104,17 +102,54 @@ Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"
 
   try {
     const text = response.choices[0]?.message?.content ?? '{}'
-    const clean = text.replace(/```json|```/g, '').trim()
-    const parsed = JSON.parse(clean)
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim())
     return { score: parsed.score ?? 0, reasoning: parsed.reasoning ?? '' }
   } catch {
-    return { score: 0, reasoning: 'Parse error in judge response' }
+    return { score: 0, reasoning: 'Parse error' }
+  }
+}
+
+// Judge 2: Gemini Flash via OpenRouter (completely different model family)
+async function judgeOpenRouter(question: string, ground_truth: string, answer: string, category: string): Promise<{ score: number; reasoning: string }> {
+  const rubric = category === 'insufficient'
+    ? 'Score 1.0 if the model correctly says the evidence is insufficient and does NOT hallucinate. Score 0.5 if it hedges but still guesses. Score 0.0 if it hallucinates a confident answer.'
+    : 'Score 1.0 if key facts match ground truth and sources are cited. Score 0.5 if partially correct or missing key detail. Score 0.0 if wrong or hallucinated.'
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://qosmic.vercel.app',
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-flash-1.5',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an evaluation judge. Score the answer against the ground truth using this rubric: ${rubric}
+Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"}`
+          },
+          { role: 'user', content: `Question: ${question}\nGround truth: ${ground_truth}\nAnswer to evaluate: ${answer}` }
+        ],
+        max_tokens: 150,
+        temperature: 0
+      })
+    })
+
+    const data = await response.json()
+    const text = data.choices?.[0]?.message?.content ?? '{}'
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim())
+    return { score: parsed.score ?? 0, reasoning: parsed.reasoning ?? '' }
+  } catch {
+    // If OpenRouter fails, fall back to Groq score
+    return { score: -1, reasoning: 'OpenRouter unavailable' }
   }
 }
 
 async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
   const ragFallback = { answer: 'Timed out — no answer returned.', docs_retrieved: 0, latency_ms: 28000 }
-  const judgeFallback = { score: 0, reasoning: 'Timed out before judge could score.' }
 
   const { answer, docs_retrieved, latency_ms } = await withTimeout(
     queryRAG(q.question, supabase),
@@ -122,11 +157,30 @@ async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
     ragFallback
   )
 
-  const { score, reasoning } = await withTimeout(
-    judgeAnswer(q.question, q.ground_truth, answer, q.category),
-    10000,
-    judgeFallback
-  )
+  // Run both judges in parallel
+  const [groqJudge, openrouterJudge] = await Promise.all([
+    withTimeout(
+      judgeGroq(q.question, q.ground_truth, answer, q.category),
+      10000,
+      { score: 0, reasoning: 'Timed out' }
+    ),
+    withTimeout(
+      judgeOpenRouter(q.question, q.ground_truth, answer, q.category),
+      10000,
+      { score: -1, reasoning: 'Timed out' }
+    )
+  ])
+
+  // Agreement: judges agree if both valid and within 0.5 of each other
+  const openrouterValid = openrouterJudge.score !== -1
+  const judges_agree = openrouterValid
+    ? Math.abs(groqJudge.score - openrouterJudge.score) <= 0.0
+    : null
+
+  // Final score: average if both available, else use Groq
+  const final_score = openrouterValid
+    ? (groqJudge.score + openrouterJudge.score) / 2
+    : groqJudge.score
 
   return {
     id: q.id,
@@ -134,8 +188,12 @@ async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
     question: q.question,
     ground_truth: q.ground_truth,
     answer,
-    score,
-    reasoning,
+    score: final_score,
+    score_judge1_llama: groqJudge.score,
+    score_judge2_gemini: openrouterValid ? openrouterJudge.score : null,
+    reasoning_judge1: groqJudge.reasoning,
+    reasoning_judge2: openrouterValid ? openrouterJudge.reasoning : 'unavailable',
+    judges_agree,
     docs_retrieved,
     latency_ms,
     recall_at_3: docs_retrieved >= 3 ? 1 : 0,
@@ -152,15 +210,12 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
 
     if (body.action === 'run_eval') {
-      // Run in parallel batches of 5
       const BATCH_SIZE = 5
       const results: Awaited<ReturnType<typeof processQuestion>>[] = []
 
       for (let i = 0; i < EVAL_QUESTIONS.length; i += BATCH_SIZE) {
         const batch = EVAL_QUESTIONS.slice(i, i + BATCH_SIZE)
-        const batchResults = await Promise.all(
-          batch.map((q) => processQuestion(q, supabase))
-        )
+        const batchResults = await Promise.all(batch.map((q) => processQuestion(q, supabase)))
         results.push(...batchResults)
       }
 
@@ -168,6 +223,12 @@ export async function POST(req: NextRequest) {
       let factualScore = 0, factualCount = 0
       let multiScore = 0, multiCount = 0
       let insufficientScore = 0, insufficientCount = 0
+
+      // Inter-judge agreement rate
+      const judgedByBoth = results.filter(r => r.judges_agree !== null)
+      const agreementRate = judgedByBoth.length > 0
+        ? judgedByBoth.filter(r => r.judges_agree).length / judgedByBoth.length
+        : null
 
       for (const r of results) {
         totalScore += r.score
@@ -185,6 +246,10 @@ export async function POST(req: NextRequest) {
         recall_at_3: Number((results.reduce((s, r) => s + r.recall_at_3, 0) / results.length).toFixed(2)),
         recall_at_5: Number((results.reduce((s, r) => s + r.recall_at_5, 0) / results.length).toFixed(2)),
         avg_latency_ms: Number((results.reduce((s, r) => s + r.latency_ms, 0) / results.length).toFixed(0)),
+        judge1: 'llama-3.1-8b-instant (Groq)',
+        judge2: 'gemini-flash-1.5 (OpenRouter)',
+        inter_judge_agreement: agreementRate !== null ? Number(agreementRate.toFixed(2)) : 'n/a',
+        questions_judged_by_both: judgedByBoth.length,
       }
 
       await supabase.from('documents').insert([{
