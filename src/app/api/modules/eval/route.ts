@@ -3,7 +3,7 @@ import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
 import { cookies } from 'next/headers'
 import Groq from 'groq-sdk'
 
-export const maxDuration = 300
+export const maxDuration = 60
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
