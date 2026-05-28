@@ -3,6 +3,8 @@ import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
 import { cookies } from 'next/headers'
 import Groq from 'groq-sdk'
 
+export const maxDuration = 300
+
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 const EVAL_QUESTIONS = [
@@ -32,6 +34,14 @@ const EVAL_QUESTIONS = [
   { id: 'Q24', category: 'insufficient', question: "Has QOSMIC filed patents on the beam acquisition algorithm?", ground_truth: "INSUFFICIENT EVIDENCE — SS-001 mentions patent-pending status but no patent numbers or filing dates are in the vault.", required_notes: [] },
   { id: 'Q25', category: 'insufficient', question: "What is the bill of materials cost for a single terminal unit?", ground_truth: "INSUFFICIENT EVIDENCE — no BOM cost data exists. Only partial cost deltas in design decision trades.", required_notes: [] },
 ]
+
+// Wraps a promise with a timeout — returns fallback instead of hanging forever
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))
+  ])
+}
 
 async function queryRAG(question: string, supabase: any): Promise<{ answer: string; docs_retrieved: number; latency_ms: number }> {
   const start = Date.now()
@@ -103,44 +113,69 @@ Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"
   }
 }
 
+// Process one question end-to-end with a hard 28s timeout per question
+async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
+  const ragFallback = { answer: 'Timed out — no answer returned.', docs_retrieved: 0, latency_ms: 28000 }
+  const judgeFallback = { score: 0, reasoning: 'Timed out before judge could score.' }
+
+  const { answer, docs_retrieved, latency_ms } = await withTimeout(
+    queryRAG(q.question, supabase),
+    28000,
+    ragFallback
+  )
+
+  const { score, reasoning } = await withTimeout(
+    judgeAnswer(q.question, q.ground_truth, answer, q.category),
+    10000,
+    judgeFallback
+  )
+
+  return {
+    id: q.id,
+    category: q.category,
+    question: q.question,
+    ground_truth: q.ground_truth,
+    answer,
+    score,
+    reasoning,
+    docs_retrieved,
+    latency_ms,
+    recall_at_3: docs_retrieved >= 3 ? 1 : 0,
+    recall_at_5: docs_retrieved >= 5 ? 1 : 0,
+  }
+}
+
 export async function POST(req: NextRequest) {
   const supabase = createRouteHandlerClient({ cookies })
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json()
 
   if (body.action === 'run_eval') {
-    const results = []
+    // Run in parallel batches of 5 — fast enough to finish, safe enough not to rate-limit
+    const BATCH_SIZE = 5
+    const results: Awaited<ReturnType<typeof processQuestion>>[] = []
+
+    for (let i = 0; i < EVAL_QUESTIONS.length; i += BATCH_SIZE) {
+      const batch = EVAL_QUESTIONS.slice(i, i + BATCH_SIZE)
+      const batchResults = await Promise.all(
+        batch.map((q) => processQuestion(q, supabase))
+      )
+      results.push(...batchResults)
+    }
+
+    // Tally scores
     let totalScore = 0
-    let factualScore = 0; let factualCount = 0
-    let multiScore = 0; let multiCount = 0
-    let insufficientScore = 0; let insufficientCount = 0
+    let factualScore = 0, factualCount = 0
+    let multiScore = 0, multiCount = 0
+    let insufficientScore = 0, insufficientCount = 0
 
-    for (const q of EVAL_QUESTIONS) {
-      const { answer, docs_retrieved, latency_ms } = await queryRAG(q.question, supabase)
-      const { score, reasoning } = await judgeAnswer(q.question, q.ground_truth, answer, q.category)
-
-      const result = {
-        id: q.id,
-        category: q.category,
-        question: q.question,
-        ground_truth: q.ground_truth,
-        answer,
-        score,
-        reasoning,
-        docs_retrieved,
-        latency_ms,
-        recall_at_3: docs_retrieved >= 3 ? 1 : 0,
-        recall_at_5: docs_retrieved >= 5 ? 1 : 0,
-      }
-
-      results.push(result)
-      totalScore += score
-
-      if (q.category === 'factual') { factualScore += score; factualCount++ }
-      if (q.category === 'multi_note') { multiScore += score; multiCount++ }
-      if (q.category === 'insufficient') { insufficientScore += score; insufficientCount++ }
+    for (const r of results) {
+      totalScore += r.score
+      if (r.category === 'factual') { factualScore += r.score; factualCount++ }
+      if (r.category === 'multi_note') { multiScore += r.score; multiCount++ }
+      if (r.category === 'insufficient') { insufficientScore += r.score; insufficientCount++ }
     }
 
     const summary = {
@@ -154,8 +189,9 @@ export async function POST(req: NextRequest) {
       avg_latency_ms: Number((results.reduce((s, r) => s + r.latency_ms, 0) / results.length).toFixed(0)),
     }
 
+    // Log the run
     await supabase.from('documents').insert([{
-      user_id: session.user.id,
+      user_id: user.id,
       title: `Eval Run ${new Date().toISOString()}`,
       content: JSON.stringify({ summary, results }),
       module: 'eval_log',
