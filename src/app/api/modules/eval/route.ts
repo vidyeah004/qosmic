@@ -146,6 +146,7 @@ async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
 }
 
 export async function POST(req: NextRequest) {
+  try {
   const supabase = createRouteHandlerClient({ cookies })
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -153,18 +154,6 @@ export async function POST(req: NextRequest) {
   const body = await req.json()
 
   if (body.action === 'run_eval') {
-    // Run in parallel batches of 5 — fast enough to finish, safe enough not to rate-limit
-    const BATCH_SIZE = 5
-    const results: Awaited<ReturnType<typeof processQuestion>>[] = []
-
-    for (let i = 0; i < EVAL_QUESTIONS.length; i += BATCH_SIZE) {
-      const batch = EVAL_QUESTIONS.slice(i, i + BATCH_SIZE)
-      const batchResults = await Promise.all(
-        batch.map((q) => processQuestion(q, supabase))
-      )
-      results.push(...batchResults)
-    }
-
     // Tally scores
     let totalScore = 0
     let factualScore = 0, factualCount = 0
