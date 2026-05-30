@@ -61,7 +61,7 @@ async function queryRAG(question: string, supabase: any): Promise<{ answer: stri
     .slice(0, 8000)
 
   const response = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: 'llama-3.1-8b-instant',
     messages: [
       {
         role: 'system',
@@ -210,14 +210,17 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
 
     if (body.action === 'run_eval') {
-      const BATCH_SIZE = 5
+      const BATCH_SIZE = 3
+      const BATCH_DELAY_MS = 4000
       const results: Awaited<ReturnType<typeof processQuestion>>[] = []
-
       for (let i = 0; i < EVAL_QUESTIONS.length; i += BATCH_SIZE) {
         const batch = EVAL_QUESTIONS.slice(i, i + BATCH_SIZE)
         const batchResults = await Promise.all(batch.map((q) => processQuestion(q, supabase)))
         results.push(...batchResults)
-      }
+        if (i + BATCH_SIZE < EVAL_QUESTIONS.length) {
+          await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS))
+  }
+}
 
       let totalScore = 0
       let factualScore = 0, factualCount = 0
