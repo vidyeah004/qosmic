@@ -12,6 +12,33 @@ observability.
 **Auth:** Supabase Auth with role-based access (Founder / Intern)
 
 ---
+## How A1, A2, and A3 Connect
+
+A2 Paper Summarizer fed the A3 literature scan. The arXiv URLs 
+for CloudSEN12, 38-Cloud, SMARTIES, and Segment Anything for EO 
+were processed through the Paper Triage sub-system before I read 
+the full papers. The structured summaries are reflected in the 
+Related Work section of A3_TECHNICAL_BRIEF.md.
+
+A1 observability data informed A2 model selection. The sessions 
+table showed Competitive Intel was the highest-latency module 
+at ~4300ms average (3 parallel LLM calls). This justified the 
+cost-aware routing threshold in A2: requests routed to the full 
+3-model competitive intel stack only above 0.8 confidence. 
+Below that threshold, single-model routing keeps latency under 
+1500ms and cost under $0.001 per request.
+
+A3 is the natural next A1 module. The cloud segmentation model 
+outputs a probability score per ground station per 15-minute 
+window. Wiring this into A1 as a Ground Station Availability 
+module is one week of work: add a scheduler that runs inference, 
+writes results to a new Supabase table, surfaces a forecast 
+dashboard. The data pipeline exists. The integration does not 
+yet.
+
+---
+
+
 ## System Architecture
 
 ```
