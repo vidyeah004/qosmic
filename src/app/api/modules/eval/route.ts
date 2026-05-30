@@ -50,8 +50,7 @@ async function queryRAG(question: string, supabase: any): Promise<{ answer: stri
     .from('documents')
     .select('title, content')
     .eq('module', 'rag')
-    .order('created_at', { ascending: false })
-    .limit(10)
+    .limit(8)
 
   if (!docs || docs.length === 0) {
     return { answer: 'No documents in knowledge base.', docs_retrieved: 0, latency_ms: Date.now() - start }
@@ -60,10 +59,10 @@ async function queryRAG(question: string, supabase: any): Promise<{ answer: stri
   const context = docs
     .map((d: any) => `[${d.title}]\n${d.content}`)
     .join('\n\n---\n\n')
-    .slice(0, 8000)
+    .slice(0, 16000)  // doubled from 8000 — fits all 8 vault files
 
   const response = await groq.chat.completions.create({
-    model: 'llama-3.1-8b-instant',
+    model: 'llama-3.3-70b-versatile',  // 70b for RAG — higher TPM limit than 8b
     messages: [
       {
         role: 'system',
@@ -74,7 +73,7 @@ If the answer is not in the context, explicitly say: "INSUFFICIENT EVIDENCE — 
       },
       { role: 'user', content: `Context:\n${context}\n\nQuestion: ${question}` }
     ],
-    max_tokens: 500,
+    max_tokens: 300,  // reduced from 500 to save daily tokens
     temperature: 0.1
   })
 
@@ -88,7 +87,7 @@ async function judgeGroq(question: string, ground_truth: string, answer: string,
     : 'Score 1.0 if key facts match ground truth and sources are cited. Score 0.5 if partially correct or missing key detail. Score 0.0 if wrong or hallucinated.'
 
   const response = await groq.chat.completions.create({
-    model: 'llama-3.1-8b-instant',
+    model: 'llama-3.1-8b-instant',  // 8b for judging — cheaper, accurate enough for scoring
     messages: [
       {
         role: 'system',
@@ -150,22 +149,22 @@ Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"
 async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
   const ragFallback = { answer: 'Timed out — no answer returned.', docs_retrieved: 0, latency_ms: 28000 }
 
-  // Step 1: RAG answer
+  // Step 1: RAG answer (70b, 300 tokens)
   const { answer, docs_retrieved, latency_ms } = await withTimeout(
     queryRAG(q.question, supabase),
     28000,
     ragFallback
   )
 
-  // Step 2: Judge 1 (Groq) — sequential, not parallel
-  await sleep(1000)
+  // Step 2: Groq judge — wait 2s after RAG to let TPM recover
+  await sleep(2000)
   const groqJudge = await withTimeout(
     judgeGroq(q.question, q.ground_truth, answer, q.category),
     10000,
     { score: 0, reasoning: 'Timed out' }
   )
 
-  // Step 3: Judge 2 (OpenRouter) — different API, no Groq TPM impact
+  // Step 3: OpenRouter judge — different API, no Groq TPM cost
   const openrouterJudge = await withTimeout(
     judgeOpenRouter(q.question, q.ground_truth, answer, q.category),
     10000,
@@ -211,12 +210,13 @@ export async function POST(req: NextRequest) {
     if (body.action === 'run_eval') {
       const results: Awaited<ReturnType<typeof processQuestion>>[] = []
 
-      // Fully sequential — one question at a time with 3s gap between
-      // Prevents Groq TPM rate limit on free tier
+      // Fully sequential — one question at a time
+      // RAG uses 70b (12k TPM), judge uses 8b (6k TPM)
+      // 5s gap between questions keeps both under their limits
       for (const q of EVAL_QUESTIONS) {
         const result = await processQuestion(q, supabase)
         results.push(result)
-        await sleep(3000)
+        await sleep(5000)  // 5s between questions — safe for both model TPM limits
       }
 
       let totalScore = 0
