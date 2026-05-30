@@ -63,7 +63,7 @@ async function queryRAG(question: string, supabase: any): Promise<{ answer: stri
     .slice(0, 8000)
 
   const response = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: 'llama-3.1-8b-instant',
     messages: [
       {
         role: 'system',
