@@ -3,7 +3,7 @@ import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
 import { cookies } from 'next/headers'
 import Groq from 'groq-sdk'
 
-export const maxDuration = 60
+export const maxDuration = 300
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
@@ -35,6 +35,8 @@ const EVAL_QUESTIONS = [
   { id: 'Q25', category: 'insufficient', question: "What is the bill of materials cost for a single terminal unit?", ground_truth: "INSUFFICIENT EVIDENCE — no BOM cost data exists. Only partial cost deltas in design decision trades.", required_notes: [] },
 ]
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([
     promise,
@@ -61,7 +63,7 @@ async function queryRAG(question: string, supabase: any): Promise<{ answer: stri
     .slice(0, 8000)
 
   const response = await groq.chat.completions.create({
-    model: 'llama-3.1-8b-instant',
+    model: 'llama-3.3-70b-versatile',
     messages: [
       {
         role: 'system',
@@ -80,7 +82,6 @@ If the answer is not in the context, explicitly say: "INSUFFICIENT EVIDENCE — 
   return { answer, docs_retrieved: docs.length, latency_ms: Date.now() - start }
 }
 
-// Judge 1: Llama via Groq
 async function judgeGroq(question: string, ground_truth: string, answer: string, category: string): Promise<{ score: number; reasoning: string }> {
   const rubric = category === 'insufficient'
     ? 'Score 1.0 if the model correctly says the evidence is insufficient and does NOT hallucinate. Score 0.5 if it hedges but still guesses. Score 0.0 if it hallucinates a confident answer.'
@@ -109,7 +110,6 @@ Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"
   }
 }
 
-// Judge 2: Gemini Flash via OpenRouter (completely different model family)
 async function judgeOpenRouter(question: string, ground_truth: string, answer: string, category: string): Promise<{ score: number; reasoning: string }> {
   const rubric = category === 'insufficient'
     ? 'Score 1.0 if the model correctly says the evidence is insufficient and does NOT hallucinate. Score 0.5 if it hedges but still guesses. Score 0.0 if it hallucinates a confident answer.'
@@ -121,7 +121,7 @@ async function judgeOpenRouter(question: string, ground_truth: string, answer: s
       headers: {
         'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://qosmic.vercel.app',
+        'HTTP-Referer': 'https://qosmic-two.vercel.app',
       },
       body: JSON.stringify({
         model: 'google/gemini-flash-1.5',
@@ -143,7 +143,6 @@ Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim())
     return { score: parsed.score ?? 0, reasoning: parsed.reasoning ?? '' }
   } catch {
-    // If OpenRouter fails, fall back to Groq score
     return { score: -1, reasoning: 'OpenRouter unavailable' }
   }
 }
@@ -151,33 +150,33 @@ Respond with ONLY valid JSON: {"score": 0.0|0.5|1.0, "reasoning": "one sentence"
 async function processQuestion(q: typeof EVAL_QUESTIONS[0], supabase: any) {
   const ragFallback = { answer: 'Timed out — no answer returned.', docs_retrieved: 0, latency_ms: 28000 }
 
+  // Step 1: RAG answer
   const { answer, docs_retrieved, latency_ms } = await withTimeout(
     queryRAG(q.question, supabase),
     28000,
     ragFallback
   )
 
-  // Run both judges in parallel
-  const [groqJudge, openrouterJudge] = await Promise.all([
-    withTimeout(
-      judgeGroq(q.question, q.ground_truth, answer, q.category),
-      10000,
-      { score: 0, reasoning: 'Timed out' }
-    ),
-    withTimeout(
-      judgeOpenRouter(q.question, q.ground_truth, answer, q.category),
-      10000,
-      { score: -1, reasoning: 'Timed out' }
-    )
-  ])
+  // Step 2: Judge 1 (Groq) — sequential, not parallel
+  await sleep(1000)
+  const groqJudge = await withTimeout(
+    judgeGroq(q.question, q.ground_truth, answer, q.category),
+    10000,
+    { score: 0, reasoning: 'Timed out' }
+  )
 
-  // Agreement: judges agree if both valid and within 0.5 of each other
+  // Step 3: Judge 2 (OpenRouter) — different API, no Groq TPM impact
+  const openrouterJudge = await withTimeout(
+    judgeOpenRouter(q.question, q.ground_truth, answer, q.category),
+    10000,
+    { score: -1, reasoning: 'Timed out' }
+  )
+
   const openrouterValid = openrouterJudge.score !== -1
   const judges_agree = openrouterValid
     ? Math.abs(groqJudge.score - openrouterJudge.score) <= 0.0
     : null
 
-  // Final score: average if both available, else use Groq
   const final_score = openrouterValid
     ? (groqJudge.score + openrouterJudge.score) / 2
     : groqJudge.score
@@ -210,24 +209,21 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
 
     if (body.action === 'run_eval') {
-      const BATCH_SIZE = 3
-      const BATCH_DELAY_MS = 4000
       const results: Awaited<ReturnType<typeof processQuestion>>[] = []
-      for (let i = 0; i < EVAL_QUESTIONS.length; i += BATCH_SIZE) {
-        const batch = EVAL_QUESTIONS.slice(i, i + BATCH_SIZE)
-        const batchResults = await Promise.all(batch.map((q) => processQuestion(q, supabase)))
-        results.push(...batchResults)
-        if (i + BATCH_SIZE < EVAL_QUESTIONS.length) {
-          await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS))
-  }
-}
+
+      // Fully sequential — one question at a time with 3s gap between
+      // Prevents Groq TPM rate limit on free tier
+      for (const q of EVAL_QUESTIONS) {
+        const result = await processQuestion(q, supabase)
+        results.push(result)
+        await sleep(3000)
+      }
 
       let totalScore = 0
       let factualScore = 0, factualCount = 0
       let multiScore = 0, multiCount = 0
       let insufficientScore = 0, insufficientCount = 0
 
-      // Inter-judge agreement rate
       const judgedByBoth = results.filter(r => r.judges_agree !== null)
       const agreementRate = judgedByBoth.length > 0
         ? judgedByBoth.filter(r => r.judges_agree).length / judgedByBoth.length
